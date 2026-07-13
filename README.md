@@ -175,6 +175,8 @@ data: {"timestamp":"2026-01-01T12:00:00.000Z"}
 
 O gerenciador usa `Map<string, Set<SseClient>>`, permitindo varias conexoes por usuario. Se `response.write()` retornar `false`, a conexao e considerada lenta, encerrada e removida. Isso evita que um cliente com backpressure bloqueie a aplicacao.
 
+O handler remove a conexao de forma idempotente ao receber `request.close`, `response.close` ou `response.error`. Esse cleanup cancela o heartbeat no `SseManager`, remove os listeners HTTP e impede novas escritas para o cliente encerrado.
+
 ## Reconexao e Last-Event-ID
 
 O servidor envia `retry`, entao clientes `EventSource` tentam reconectar automaticamente.

@@ -1,10 +1,14 @@
-export type ConnectionStatus =
+import type { Notification } from "./notification";
+
+export type SseConnectionStatus =
   | "idle"
   | "connecting"
   | "connected"
   | "reconnecting"
   | "disconnected"
   | "error";
+
+export type ConnectionStatus = SseConnectionStatus;
 
 export interface StreamLog {
   id: string;
@@ -19,4 +23,29 @@ export interface ConnectedEventData {
 
 export interface PingEventData {
   timestamp: string;
+}
+
+export interface SseConnectOptions {
+  url: string;
+  userId: string;
+}
+
+export interface SseSubscriber extends SseConnectOptions {
+  onConnected?: () => void;
+  onNotification?: (
+    notification: Notification,
+    lastEventId: string
+  ) => void;
+  onPing?: (timestamp: string) => void;
+  onError?: (message: string) => void;
+  onStatusChange?: (status: SseConnectionStatus) => void;
+}
+
+export interface SseClientContract {
+  connect(options: SseConnectOptions): void;
+  disconnect(reason?: string): void;
+  subscribe(subscriber: SseSubscriber): () => void;
+  isConnected(): boolean;
+  getStatus(): SseConnectionStatus;
+  getCurrentUserId(): string | null;
 }

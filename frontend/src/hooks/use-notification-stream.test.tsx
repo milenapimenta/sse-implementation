@@ -1,5 +1,7 @@
-import { act, renderHook } from "@testing-library/react";
+import { StrictMode, type PropsWithChildren } from "react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sseClient } from "../services/sse-client";
 import type { Notification } from "../types/notification";
 import { useNotificationStream } from "./use-notification-stream";
 
@@ -68,12 +70,17 @@ class MockEventSource {
 
 describe("useNotificationStream", () => {
   beforeEach(() => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
     MockEventSource.instances = [];
     window.localStorage.clear();
     vi.stubGlobal("EventSource", MockEventSource);
+    sseClient.disconnect("test-reset");
   });
 
   afterEach(() => {
+    cleanup();
+    sseClient.disconnect("test-cleanup");
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -138,7 +145,7 @@ describe("useNotificationStream", () => {
     expect(result.current.status).toBe("reconnecting");
   });
 
-  it("closes manually and cleans up on unmount", () => {
+  it("closes manually and cleans up on unmount", async () => {
     const { result, unmount } = renderHook(() =>
       useNotificationStream({ userId: "user-123", onNotification: vi.fn() })
     );
@@ -153,6 +160,64 @@ describe("useNotificationStream", () => {
     act(() => result.current.connect());
     const secondSource = MockEventSource.instances[1];
     unmount();
+    await act(() => Promise.resolve());
     expect(secondSource.closeCalls).toBe(1);
+  });
+
+  it("keeps a single connection under React Strict Mode", () => {
+    const wrapper = ({ children }: PropsWithChildren) => (
+      <StrictMode>{children}</StrictMode>
+    );
+    const { result } = renderHook(
+      () =>
+        useNotificationStream({
+          userId: "user-123",
+          onNotification: vi.fn()
+        }),
+      { wrapper }
+    );
+
+    act(() => result.current.connect());
+    act(() => result.current.connect());
+
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(MockEventSource.instances[0].listenerCount("notification")).toBe(1);
+  });
+
+  it("reuses the same connection during Strict Mode effect replay", () => {
+    const wrapper = ({ children }: PropsWithChildren) => (
+      <StrictMode>{children}</StrictMode>
+    );
+
+    renderHook(
+      () =>
+        useNotificationStream({
+          userId: "user-123",
+          enabled: true,
+          onNotification: vi.fn()
+        }),
+      { wrapper }
+    );
+
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(MockEventSource.instances[0].closeCalls).toBe(0);
+    expect(MockEventSource.instances[0].listenerCount("notification")).toBe(1);
+  });
+
+  it("closes the old stream when the user changes", () => {
+    const { result, rerender } = renderHook(
+      ({ userId }) =>
+        useNotificationStream({ userId, onNotification: vi.fn() }),
+      { initialProps: { userId: "user-123" } }
+    );
+    act(() => result.current.connect());
+    const first = MockEventSource.instances[0];
+
+    rerender({ userId: "user-456" });
+
+    expect(first.closeCalls).toBe(1);
+    expect(result.current.status).toBe("idle");
+    expect(result.current.lastEventId).toBeNull();
+    expect(result.current.lastHeartbeatAt).toBeNull();
   });
 });

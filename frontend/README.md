@@ -32,6 +32,8 @@ src/
 ├── hooks/
 │   ├── use-notification-stream.ts
 │   └── use-notifications.ts
+├── services/
+│   └── sse-client.ts
 ├── config/
 │   └── env.ts
 ├── types/
@@ -122,16 +124,30 @@ A tela possui:
 
 ## Ciclo de vida do EventSource
 
-O hook `useNotificationStream` centraliza o SSE:
+O singleton `SseClient` e o unico proprietario do `EventSource` dentro do contexto JavaScript da pagina. O hook `useNotificationStream` apenas registra uma assinatura e traduz os eventos do singleton para estado React.
 
-- cria apenas uma instancia ativa de `EventSource`;
+- reutiliza a conexao ativa quando `userId` e URL sao iguais;
+- encerra e limpa a conexao anterior antes de conectar outro usuario ou URL;
+- distribui eventos para um conjunto de assinantes do stream atual;
+- fecha o stream quando o ultimo assinante e removido;
+- usa uma geracao e a referencia do `EventSource` para ignorar callbacks atrasados;
 - registra listeners para `connected`, `notification`, `ping` e `error`;
-- fecha a conexao no desmontar do componente;
-- fecha a conexao se o usuario mudar;
+- remove todos os listeners antes de chamar `EventSource.close()`;
+- fecha no disconnect manual, logout, troca de usuario e desmontagem;
+- fecha sincronamente em `pagehide` e `beforeunload`;
+- permite uma retomada controlada em `pageshow` vindo do bfcache, somente se o assinante ainda existir;
 - nao implementa loop manual de reconexao;
 - deixa o navegador respeitar o `retry` enviado pela API.
 
-Quando ocorre `error`, se o `readyState` for `CONNECTING`, o estado visual vira `Reconectando`. O hook nao chama `connect()` dentro do `onerror`, evitando streams concorrentes.
+O metodo central `disconnect(reason)` e idempotente. Chamadas repetidas nao voltam a fechar a mesma conexao e invalidam callbacks antigos. O back-end detecta o encerramento da propria conexao HTTP; o front nao envia uma requisicao separada de logout.
+
+Quando ocorre `error`, se o `readyState` for `CONNECTING`, o estado visual vira `Reconectando`. O singleton nao chama `connect()` dentro do `onerror`, evitando concorrer com a reconexao automatica nativa.
+
+Em desenvolvimento, logs prefixados com `[SSE]` mostram conexao, reutilizacao, reconexao, desconexao, eventos de pagina e quantidade de assinantes, sem registrar credenciais.
+
+### Limite por aba
+
+O singleton garante uma conexao ativa por aba e por contexto JavaScript. Duas abas possuem dois contextos e, portanto, duas instancias independentes do singleton e duas conexoes no servidor. Coordenacao entre abas exigiria `BroadcastChannel`, `SharedWorker` ou eleicao de uma aba principal; isso nao faz parte desta implementacao.
 
 ## Deduplicacao
 
@@ -163,7 +179,8 @@ Depois de um reload completo da pagina, o `EventSource` nativo nao permite confi
 2. Conecte ambas como `user-123`.
 3. Crie uma notificacao para `user-123`.
 4. As duas abas devem receber o evento.
-5. Atualize o painel de status da API para ver `sseConnections`.
+5. Atualize o painel de status da API e confirme duas conexoes.
+6. Feche uma aba e confirme que apenas uma conexao permanece.
 
 ## Testar reconexao
 
@@ -206,10 +223,13 @@ a integracao local funciona sem configuracao adicional.
 12. Atualize a pagina e confirme a persistencia pela lista HTTP.
 13. Abra duas abas e confirme duas conexoes em `/metrics`.
 14. Feche uma aba e atualize as metricas.
+15. Com uma unica aba conectada, renderize novamente a tela e confirme que `/metrics` continua mostrando uma conexao.
+16. Troque o usuario e confirme que notificacoes do usuario anterior nao chegam ao novo estado.
 
 ## Limitacoes
 
 - O front nao recupera `Last-Event-ID` depois de reload completo.
+- O singleton nao coordena conexoes entre abas diferentes.
 - Health check e metricas nao usam polling; atualizam no carregamento, botoes e acoes de conectar/desconectar.
 - Notificacoes nativas do navegador sao opcionais e dependem de permissao explicita.
 - A autenticacao segue o modelo didatico da API: `X-User-Id` em HTTP e `userId` na query do SSE.

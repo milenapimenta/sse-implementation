@@ -1,16 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { config } from "../config/env";
+import { sseClient } from "../services/sse-client";
 import type { Notification } from "../types/notification";
-import type {
-  ConnectedEventData,
-  ConnectionStatus,
-  PingEventData,
-  StreamLog
-} from "../types/sse";
+import type { ConnectionStatus, StreamLog } from "../types/sse";
 import { createStreamLog } from "../utils/stream-log";
 
 export interface UseNotificationStreamOptions {
-  userId: string;
+  userId: string | null;
+  enabled?: boolean;
   onNotification: (notification: Notification) => void;
   onStreamEvent?: (event: StreamLog) => void;
 }
@@ -23,12 +20,9 @@ export interface UseNotificationStreamResult {
   disconnect: () => void;
 }
 
-function parseEventData<T>(event: MessageEvent<string>): T {
-  return JSON.parse(event.data) as T;
-}
-
 export function useNotificationStream({
   userId,
+  enabled = false,
   onNotification,
   onStreamEvent
 }: UseNotificationStreamOptions): UseNotificationStreamResult {
@@ -37,12 +31,8 @@ export function useNotificationStream({
     window.localStorage.getItem("notifications:lastEventId")
   );
   const [lastHeartbeatAt, setLastHeartbeatAt] = useState<string | null>(null);
-
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const cleanupListenersRef = useRef<(() => void) | null>(null);
   const onNotificationRef = useRef(onNotification);
   const onStreamEventRef = useRef(onStreamEvent);
-  const previousUserIdRef = useRef(userId);
 
   useEffect(() => {
     onNotificationRef.current = onNotification;
@@ -52,134 +42,80 @@ export function useNotificationStream({
     onStreamEventRef.current = onStreamEvent;
   }, [onStreamEvent]);
 
+  const normalizedUserId = userId?.trim() ?? "";
+  const previousUserIdRef = useRef(normalizedUserId);
+  const streamUrl = useMemo(
+    () =>
+      normalizedUserId
+        ? `${config.apiUrl}/api/notifications/stream?userId=${encodeURIComponent(
+            normalizedUserId
+          )}`
+        : "",
+    [normalizedUserId]
+  );
+
   const emitLog = useCallback((type: StreamLog["type"], message: string) => {
     onStreamEventRef.current?.(createStreamLog(type, message));
   }, []);
 
-  const closeCurrent = useCallback(
-    (nextStatus: ConnectionStatus, logMessage?: string) => {
-      const current = eventSourceRef.current;
+  useEffect(() => {
+    setStatus("idle");
 
-      cleanupListenersRef.current?.();
-      cleanupListenersRef.current = null;
+    if (previousUserIdRef.current !== normalizedUserId) {
+      previousUserIdRef.current = normalizedUserId;
+      setLastHeartbeatAt(null);
+      setLastEventId(null);
+    }
 
-      if (current) {
-        current.close();
-      }
+    if (!normalizedUserId || !streamUrl) {
+      return;
+    }
 
-      eventSourceRef.current = null;
-      setStatus(nextStatus);
+    return sseClient.subscribe({
+      userId: normalizedUserId,
+      url: streamUrl,
+      onStatusChange: setStatus,
+      onConnected: () => emitLog("connected", "Stream conectado."),
+      onNotification: (notification, eventId) => {
+        if (eventId) {
+          setLastEventId(eventId);
+          window.localStorage.setItem("notifications:lastEventId", eventId);
+        }
 
-      if (logMessage) {
-        emitLog("closed", logMessage);
-      }
-    },
-    [emitLog]
-  );
+        onNotificationRef.current(notification);
+        emitLog(
+          "notification",
+          `Notificacao ${notification.id} recebida para ${notification.userId}.`
+        );
+      },
+      onPing: (timestamp) => {
+        setLastHeartbeatAt(timestamp);
+        emitLog("ping", `Heartbeat recebido em ${timestamp}.`);
+      },
+      onError: (message) => emitLog("error", message)
+    });
+  }, [emitLog, normalizedUserId, streamUrl]);
 
   const connect = useCallback(() => {
-    const normalizedUserId = userId.trim();
-
-    if (!normalizedUserId) {
+    if (!normalizedUserId || !streamUrl) {
       setStatus("error");
       emitLog("error", "Informe um usuario antes de conectar.");
       return;
     }
 
-    if (eventSourceRef.current) {
-      if (eventSourceRef.current.readyState !== EventSource.CLOSED) {
-        return;
-      }
-
-      closeCurrent("idle");
-    }
-
-    setStatus("connecting");
-    const url = `${config.apiUrl}/api/notifications/stream?userId=${encodeURIComponent(
-      normalizedUserId
-    )}`;
-    const eventSource = new EventSource(url);
-    eventSourceRef.current = eventSource;
-
-    const handleOpen = () => {
-      setStatus("connected");
-    };
-
-    const handleConnected = (event: MessageEvent<string>) => {
-      const data = parseEventData<ConnectedEventData>(event);
-      setStatus(data.connected ? "connected" : "connecting");
-      emitLog("connected", "Stream conectado.");
-    };
-
-    const handleNotification = (event: MessageEvent<string>) => {
-      const notification = parseEventData<Notification>(event);
-
-      if (event.lastEventId) {
-        setLastEventId(event.lastEventId);
-        window.localStorage.setItem("notifications:lastEventId", event.lastEventId);
-      }
-
-      onNotificationRef.current(notification);
-      emitLog(
-        "notification",
-        `Notificacao ${notification.id} recebida para ${notification.userId}.`
-      );
-    };
-
-    const handlePing = (event: MessageEvent<string>) => {
-      const data = parseEventData<PingEventData>(event);
-      setLastHeartbeatAt(data.timestamp);
-      emitLog("ping", `Heartbeat recebido em ${data.timestamp}.`);
-    };
-
-    const handleError = () => {
-      if (eventSource.readyState === EventSource.CONNECTING) {
-        setStatus("reconnecting");
-        emitLog("error", "Conexao perdida. O navegador tentara reconectar.");
-        return;
-      }
-
-      if (eventSource.readyState === EventSource.CLOSED) {
-        setStatus("error");
-        emitLog("error", "Stream fechado com erro.");
-      }
-    };
-
-    eventSource.addEventListener("open", handleOpen);
-    eventSource.addEventListener("connected", handleConnected);
-    eventSource.addEventListener("notification", handleNotification);
-    eventSource.addEventListener("ping", handlePing);
-    eventSource.addEventListener("error", handleError);
-
-    cleanupListenersRef.current = () => {
-      eventSource.removeEventListener("open", handleOpen);
-      eventSource.removeEventListener("connected", handleConnected);
-      eventSource.removeEventListener("notification", handleNotification);
-      eventSource.removeEventListener("ping", handlePing);
-      eventSource.removeEventListener("error", handleError);
-    };
-  }, [closeCurrent, emitLog, userId]);
+    sseClient.connect({ userId: normalizedUserId, url: streamUrl });
+  }, [emitLog, normalizedUserId, streamUrl]);
 
   const disconnect = useCallback(() => {
-    closeCurrent("disconnected", "Stream desconectado manualmente.");
-  }, [closeCurrent]);
+    sseClient.disconnect("manual");
+    emitLog("closed", "Stream desconectado manualmente.");
+  }, [emitLog]);
 
   useEffect(() => {
-    if (previousUserIdRef.current === userId) {
-      return;
+    if (enabled) {
+      connect();
     }
-
-    previousUserIdRef.current = userId;
-    closeCurrent("idle");
-    setLastHeartbeatAt(null);
-    setLastEventId(null);
-  }, [closeCurrent, userId]);
-
-  useEffect(() => {
-    return () => {
-      closeCurrent("disconnected");
-    };
-  }, [closeCurrent]);
+  }, [connect, enabled]);
 
   return {
     status,

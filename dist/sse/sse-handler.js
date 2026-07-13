@@ -23,9 +23,23 @@ function createSseHandler(options) {
             response.setHeader("X-Accel-Buffering", "no");
             response.flushHeaders();
             const client = sseManager.add(userId, response);
-            request.on("close", () => {
-                sseManager.remove(client.id, "client_closed");
-            });
+            let cleanedUp = false;
+            const cleanup = (reason) => {
+                if (cleanedUp) {
+                    return;
+                }
+                cleanedUp = true;
+                request.off("close", handleRequestClose);
+                response.off("close", handleResponseClose);
+                response.off("error", handleResponseError);
+                sseManager.remove(client.id, reason);
+            };
+            const handleRequestClose = () => cleanup("request_closed");
+            const handleResponseClose = () => cleanup("response_closed");
+            const handleResponseError = () => cleanup("response_error");
+            request.on("close", handleRequestClose);
+            response.on("close", handleResponseClose);
+            response.on("error", handleResponseError);
             sseManager.sendToClient(client, { retry: retryMs });
             sseManager.sendToClient(client, {
                 event: "connected",

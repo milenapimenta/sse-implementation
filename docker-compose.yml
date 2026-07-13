@@ -1,6 +1,8 @@
 services:
   postgres:
     image: postgres:16-alpine
+    networks:
+      - estudo-sse-network
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -17,6 +19,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    networks:
+      - estudo-sse-network
     ports:
       - "${REDIS_PORT:-56379}:6379"
     healthcheck:
@@ -27,6 +31,8 @@ services:
 
   api:
     build: .
+    networks:
+      - estudo-sse-network
     environment:
       PORT: 3000
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/notifications
@@ -56,5 +62,21 @@ services:
       timeout: 5s
       retries: 6
 
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:3000}
+    networks:
+      - estudo-sse-network
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   postgres_data:
+
+networks:
+  estudo-sse-network:

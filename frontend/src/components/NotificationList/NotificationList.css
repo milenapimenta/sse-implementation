@@ -1,0 +1,47 @@
+.notification-list {
+  display: grid;
+  gap: 14px;
+}
+
+.notification-list__header {
+  align-items: flex-start;
+}
+
+.notification-list__filters {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 4px;
+  background: var(--color-muted-surface);
+}
+
+.notification-list__filters button {
+  min-height: 34px;
+  border-color: transparent;
+  color: var(--color-muted);
+  background: transparent;
+}
+
+.notification-list__filters button.is-selected {
+  color: #fff;
+  background: var(--color-accent);
+}
+
+.notification-list__items {
+  display: grid;
+  gap: 12px;
+}
+
+.empty-state {
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+  padding: 28px;
+  background: var(--color-muted-surface);
+  text-align: center;
+}
+
+.empty-state p {
+  margin: 6px 0 0;
+  color: var(--color-muted);
+}

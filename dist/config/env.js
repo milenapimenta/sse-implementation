@@ -13,6 +13,13 @@ const envSchema = zod_1.z.object({
         .string()
         .url()
         .default("postgresql://postgres:postgres@localhost:5432/notifications"),
+    DATABASE_POOL_MAX: zod_1.z.coerce.number().int().positive().default(10),
+    DATABASE_IDLE_TIMEOUT_MS: zod_1.z.coerce.number().int().positive().default(30000),
+    DATABASE_CONNECTION_TIMEOUT_MS: zod_1.z.coerce
+        .number()
+        .int()
+        .positive()
+        .default(5000),
     REDIS_URL: zod_1.z.string().url().default("redis://localhost:6379"),
     SSE_HEARTBEAT_INTERVAL_MS: zod_1.z.coerce.number().int().positive().default(15000),
     SSE_RETRY_MS: zod_1.z.coerce.number().int().positive().default(3000),

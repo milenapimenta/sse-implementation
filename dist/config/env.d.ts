@@ -4,6 +4,9 @@ declare const envSchema: z.ZodObject<{
     NODE_ENV: z.ZodDefault<z.ZodEnum<["development", "test", "production"]>>;
     PORT: z.ZodDefault<z.ZodNumber>;
     DATABASE_URL: z.ZodDefault<z.ZodString>;
+    DATABASE_POOL_MAX: z.ZodDefault<z.ZodNumber>;
+    DATABASE_IDLE_TIMEOUT_MS: z.ZodDefault<z.ZodNumber>;
+    DATABASE_CONNECTION_TIMEOUT_MS: z.ZodDefault<z.ZodNumber>;
     REDIS_URL: z.ZodDefault<z.ZodString>;
     SSE_HEARTBEAT_INTERVAL_MS: z.ZodDefault<z.ZodNumber>;
     SSE_RETRY_MS: z.ZodDefault<z.ZodNumber>;
@@ -13,6 +16,9 @@ declare const envSchema: z.ZodObject<{
     NODE_ENV: "development" | "test" | "production";
     PORT: number;
     DATABASE_URL: string;
+    DATABASE_POOL_MAX: number;
+    DATABASE_IDLE_TIMEOUT_MS: number;
+    DATABASE_CONNECTION_TIMEOUT_MS: number;
     REDIS_URL: string;
     SSE_HEARTBEAT_INTERVAL_MS: number;
     SSE_RETRY_MS: number;
@@ -22,6 +28,9 @@ declare const envSchema: z.ZodObject<{
     NODE_ENV?: "development" | "test" | "production" | undefined;
     PORT?: number | undefined;
     DATABASE_URL?: string | undefined;
+    DATABASE_POOL_MAX?: number | undefined;
+    DATABASE_IDLE_TIMEOUT_MS?: number | undefined;
+    DATABASE_CONNECTION_TIMEOUT_MS?: number | undefined;
     REDIS_URL?: string | undefined;
     SSE_HEARTBEAT_INTERVAL_MS?: number | undefined;
     SSE_RETRY_MS?: number | undefined;
@@ -34,6 +43,9 @@ export declare const env: {
     NODE_ENV: "development" | "test" | "production";
     PORT: number;
     DATABASE_URL: string;
+    DATABASE_POOL_MAX: number;
+    DATABASE_IDLE_TIMEOUT_MS: number;
+    DATABASE_CONNECTION_TIMEOUT_MS: number;
     REDIS_URL: string;
     SSE_HEARTBEAT_INTERVAL_MS: number;
     SSE_RETRY_MS: number;

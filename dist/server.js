@@ -7,6 +7,7 @@ const node_http_1 = __importDefault(require("node:http"));
 const app_1 = require("./app");
 const env_1 = require("./config/env");
 const postgres_1 = require("./database/postgres");
+const shutdown_1 = require("./lifecycle/shutdown");
 const notification_controller_1 = require("./modules/notifications/notification.controller");
 const notification_repository_1 = require("./modules/notifications/notification.repository");
 const notification_routes_1 = require("./modules/notifications/notification.routes");
@@ -15,25 +16,14 @@ const redis_1 = require("./redis/redis");
 const sse_handler_1 = require("./sse/sse-handler");
 const sse_manager_1 = require("./sse/sse-manager");
 const logger_1 = require("./utils/logger");
-const wait_1 = require("./utils/wait");
 const logger = (0, logger_1.createLogger)(env_1.env);
 async function main() {
-    const pool = (0, postgres_1.createPgPool)(env_1.env);
-    const redisClients = (0, redis_1.createRedisClients)(env_1.env);
-    pool.on("error", (error) => {
-        logger.error({ err: error }, "postgres pool error");
-    });
-    for (const [name, client] of Object.entries(redisClients)) {
-        client.on("error", (error) => {
-            logger.error({ err: error, client: name }, "redis client error");
-        });
-    }
+    const pool = (0, postgres_1.getPostgresPool)({ env: env_1.env, logger });
+    const redisClients = (0, redis_1.getRedisClients)({ env: env_1.env, logger });
     await (0, postgres_1.waitForPostgres)(pool, logger);
-    await (0, redis_1.waitForRedis)(redisClients.general, logger);
-    await Promise.all([
-        redisClients.publisher.connect(),
-        redisClients.subscriber.connect()
-    ]);
+    await (0, redis_1.connectRedisClient)("command", { env: env_1.env, logger });
+    await (0, redis_1.connectRedisClient)("publisher", { env: env_1.env, logger });
+    await (0, redis_1.checkRedis)(redisClients.general);
     const repository = new notification_repository_1.NotificationRepository(pool);
     const sseManager = new sse_manager_1.SseManager(logger);
     const service = new notification_service_1.NotificationService(repository, redisClients.publisher, logger);
@@ -45,8 +35,8 @@ async function main() {
         retryMs: env_1.env.SSE_RETRY_MS,
         logger
     });
-    await (0, redis_1.subscribeToNotifications)({
-        subscriber: redisClients.subscriber,
+    await (0, redis_1.initializeNotificationSubscriber)({
+        env: env_1.env,
         sseManager,
         logger
     });
@@ -57,8 +47,12 @@ async function main() {
         sseManager,
         healthChecks: {
             postgres: () => (0, postgres_1.checkPostgres)(pool),
-            redis: () => redisClients.general.ping().then(() => undefined)
-        }
+            redis: () => (0, redis_1.checkRedis)(redisClients.general)
+        },
+        resourceMetrics: () => ({
+            postgres: (0, postgres_1.getPostgresPoolMetrics)(),
+            redis: (0, redis_1.getRedisStatusMetrics)()
+        })
     });
     const server = node_http_1.default.createServer(app);
     server.timeout = 0;
@@ -68,36 +62,12 @@ async function main() {
         server.listen(env_1.env.PORT, () => resolve());
     });
     logger.info({ port: env_1.env.PORT }, "api started");
-    let shuttingDown = false;
-    const shutdown = async (signal) => {
-        if (shuttingDown) {
-            return;
-        }
-        shuttingDown = true;
-        logger.info({ signal }, "graceful shutdown started");
-        const closeServer = new Promise((resolve, reject) => {
-            server.close((error) => {
-                if (error) {
-                    reject(error);
-                    return;
-                }
-                resolve();
-            });
-        });
-        sseManager.closeAll({
-            event: "shutdown",
-            data: { reason: "server_shutdown" }
-        });
-        await Promise.race([closeServer, (0, wait_1.wait)(5000)]);
-        await (0, redis_1.closeRedisClients)(redisClients);
-        await pool.end();
-        logger.info("graceful shutdown finished");
-    };
-    process.once("SIGINT", () => {
-        void shutdown("SIGINT").then(() => process.exit(0));
-    });
-    process.once("SIGTERM", () => {
-        void shutdown("SIGTERM").then(() => process.exit(0));
+    (0, shutdown_1.registerGracefulShutdown)({
+        server,
+        sseManager,
+        logger,
+        closeRedisClients: redis_1.closeRedisClients,
+        closePostgresPool: postgres_1.closePostgresPool
     });
 }
 void main().catch((error) => {

@@ -35,9 +35,15 @@ function createApp(options) {
         });
     }));
     app.get("/metrics", (_request, response) => {
-        response.json({
-            sseConnections: options.sseManager.countConnections(),
+        const sse = {
+            connections: options.sseManager.countConnections(),
             connectedUsers: options.sseManager.countUsers()
+        };
+        response.json({
+            sseConnections: sse.connections,
+            connectedUsers: sse.connectedUsers,
+            sse,
+            ...options.resourceMetrics?.()
         });
     });
     app.use("/api/notifications", options.notificationRoutes);

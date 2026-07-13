@@ -6,7 +6,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.runMigrations = runMigrations;
 const promises_1 = __importDefault(require("node:fs/promises"));
 const node_path_1 = __importDefault(require("node:path"));
-const env_1 = require("../config/env");
 const postgres_1 = require("./postgres");
 const DEFAULT_MIGRATIONS_DIR = node_path_1.default.resolve(process.cwd(), "migrations");
 async function runMigrations(pool, migrationsDir = DEFAULT_MIGRATIONS_DIR) {
@@ -25,26 +24,30 @@ async function runMigrations(pool, migrationsDir = DEFAULT_MIGRATIONS_DIR) {
             continue;
         }
         const sql = await promises_1.default.readFile(node_path_1.default.join(migrationsDir, filename), "utf8");
-        await pool.query("begin");
+        const client = await pool.connect();
         try {
-            await pool.query(sql);
-            await pool.query("insert into schema_migrations (filename) values ($1)", [filename]);
-            await pool.query("commit");
+            await client.query("begin");
+            await client.query(sql);
+            await client.query("insert into schema_migrations (filename) values ($1)", [filename]);
+            await client.query("commit");
             console.log(`Applied migration ${filename}`);
         }
         catch (error) {
-            await pool.query("rollback");
+            await client.query("rollback");
             throw error;
+        }
+        finally {
+            client.release();
         }
     }
 }
 async function main() {
-    const pool = (0, postgres_1.createPgPool)(env_1.env);
+    const pool = (0, postgres_1.getPostgresPool)();
     try {
         await runMigrations(pool);
     }
     finally {
-        await pool.end();
+        await (0, postgres_1.closePostgresPool)();
     }
 }
 if (require.main === module) {

@@ -5,4 +5,4 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:3000}
     ports:
-      - "5173:80"
+      - "80:80"

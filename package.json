@@ -9,11 +9,12 @@
     "start": "node dist/server.js",
     "migrate": "tsx src/database/migrate.ts",
     "migrate:prod": "node dist/database/migrate.js",
+    "db:migrate:test": "NODE_ENV=test DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/notifications_test} tsx src/database/migrate.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:unit": "vitest run src/tests/*.test.ts",
-    "test:integration": "vitest run src/tests/*.integration.test.ts"
+    "test": "vitest run --no-cache",
+    "test:unit": "vitest run --no-cache --exclude \"src/tests/**/*.integration.test.ts\"",
+    "test:integration": "RUN_INTEGRATION_TESTS=true vitest run --no-cache src/tests/*.integration.test.ts"
   },
   "keywords": [
     "sse",

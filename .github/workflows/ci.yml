@@ -1,0 +1,106 @@
+name: Continuous Integration
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  continuous-integration:
+    name: Lint, Typecheck, Tests and Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      NODE_ENV: test
+      LOG_LEVEL: silent
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/notifications_test
+      REDIS_URL: redis://localhost:6379
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: notifications_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d notifications_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Wait for PostgreSQL and Redis
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..30}; do
+            if docker exec "${{ job.services.postgres.id }}" pg_isready -U postgres -d notifications_test; then
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              echo "PostgreSQL did not become healthy in time"
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          for attempt in {1..30}; do
+            if docker exec "${{ job.services.redis.id }}" redis-cli ping | grep -q PONG; then
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              echo "Redis did not become healthy in time"
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Check TypeScript
+        run: npm run typecheck
+
+      - name: Prepare test database
+        run: npm run db:migrate:test
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Build application
+        run: npm run build

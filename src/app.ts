@@ -13,12 +13,26 @@ export interface HealthChecks {
   redis: () => Promise<void>;
 }
 
+export interface AppResourceMetrics {
+  postgres?: {
+    totalConnections: number;
+    idleConnections: number;
+    waitingRequests: number;
+  };
+  redis?: {
+    command: string;
+    publisher: string;
+    subscriber: string;
+  };
+}
+
 export function createApp(options: {
   env: Env;
   logger: AppLogger;
   notificationRoutes: Router;
   sseManager: SseManager;
   healthChecks: HealthChecks;
+  resourceMetrics?: () => AppResourceMetrics;
 }) {
   const app = express();
   const publicDir = path.resolve(process.cwd(), "public");
@@ -56,9 +70,16 @@ export function createApp(options: {
   );
 
   app.get("/metrics", (_request, response) => {
-    response.json({
-      sseConnections: options.sseManager.countConnections(),
+    const sse = {
+      connections: options.sseManager.countConnections(),
       connectedUsers: options.sseManager.countUsers()
+    };
+
+    response.json({
+      sseConnections: sse.connections,
+      connectedUsers: sse.connectedUsers,
+      sse,
+      ...options.resourceMetrics?.()
     });
   });
 

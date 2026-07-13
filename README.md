@@ -37,8 +37,14 @@ Responsabilidades principais:
 
 - `modules/notifications`: validacao, rotas, controller, service e repository.
 - `sse`: formatacao oficial SSE, handler HTTP e gerenciador de conexoes.
-- `database`: pool PostgreSQL e runner de migrations.
-- `redis`: clientes separados para publisher, subscriber e operacoes gerais.
+- `database`: singleton do pool PostgreSQL, health check e runner de migrations.
+- `redis`: singletons separados para publisher, subscriber e operacoes gerais.
+- `lifecycle`: coordenacao de graceful shutdown.
+
+Os singletons valem por processo Node.js. Se a API rodar com duas replicas,
+dois containers, cluster mode ou multiplos workers, cada processo tera seu
+proprio pool PostgreSQL e seus tres clientes Redis. Isso e esperado; objetos
+JavaScript nao sao compartilhados entre processos.
 
 ## Fluxo da notificacao
 
@@ -60,6 +66,24 @@ a instancia que possui conexoes do usuario envia via SSE
 
 O PostgreSQL e a fonte persistente das notificacoes. A tabela usa `BIGSERIAL` como `id`, o que tambem serve como identificador sequencial do evento SSE. Isso facilita a recuperacao com `Last-Event-ID`.
 
+A API mantem uma unica instancia de `pg.Pool` por processo. Esse singleton e
+um pool compartilhado, nao uma unica conexao fisica; o proprio `pg` administra
+as conexoes internas conforme `DATABASE_POOL_MAX`.
+
+O total potencial de conexoes no banco e aproximadamente:
+
+```text
+numero de processos da API x DATABASE_POOL_MAX
+```
+
+Exemplo: 4 replicas com `DATABASE_POOL_MAX=10` podem abrir ate 40 conexoes no
+PostgreSQL.
+
+Repositories recebem o pool por injecao de dependencia durante o bootstrap.
+Health checks usam `pool.query("select 1")` e nao criam nem encerram pools.
+Transacoes, como as migrations, usam `pool.connect()` com `release()` em
+`finally`.
+
 A migration cria indices por:
 
 - `user_id`
@@ -76,9 +100,20 @@ Este projeto usa um unico canal, `notifications`, em vez de um canal por usuario
 
 Existem clientes Redis separados para:
 
-- publicar eventos
-- assinar eventos
-- operacoes gerais e health check
+- `command`: operacoes gerais e health check
+- `publisher`: `publish`
+- `subscriber`: `subscribe` e recebimento de `message`
+
+Esses tres clientes tambem sao singletons por processo. O subscriber nao e
+usado para comandos gerais porque, apos `subscribe`, uma conexao Redis entra em
+modo Pub/Sub. A inicializacao da assinatura e idempotente: chamadas repetidas
+reutilizam a mesma promise, nao registram `message` mais de uma vez e nao criam
+subscribers adicionais.
+
+O `ioredis` usa `lazyConnect: true`, mas as chamadas a `connect()` ficam
+centralizadas no bootstrap/gerenciador Redis. A reconexao fica a cargo do
+`ioredis` via `retryStrategy`; a aplicacao nao cria clientes novos em eventos
+de erro.
 
 ## SSE
 
@@ -181,6 +216,9 @@ Suba PostgreSQL e Redis localmente e configure `.env`:
 ```env
 PORT=3000
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/notifications
+DATABASE_POOL_MAX=10
+DATABASE_IDLE_TIMEOUT_MS=30000
+DATABASE_CONNECTION_TIMEOUT_MS=5000
 REDIS_URL=redis://localhost:6379
 SSE_HEARTBEAT_INTERVAL_MS=15000
 SSE_RETRY_MS=3000
@@ -279,6 +317,29 @@ Metricas simples:
 curl http://localhost:3000/metrics
 ```
 
+A resposta mantem os campos antigos de SSE e inclui diagnosticos seguros:
+
+```json
+{
+  "sseConnections": 2,
+  "connectedUsers": 1,
+  "sse": {
+    "connections": 2,
+    "connectedUsers": 1
+  },
+  "postgres": {
+    "totalConnections": 1,
+    "idleConnections": 1,
+    "waitingRequests": 0
+  },
+  "redis": {
+    "command": "ready",
+    "publisher": "ready",
+    "subscriber": "ready"
+  }
+}
+```
+
 ## Cliente HTML
 
 Abra:
@@ -360,6 +421,9 @@ docker compose exec postgres psql -U postgres -d notifications \
 - O endpoint `POST /api/notifications` e um produtor didatico. Em producao, ele deve ser protegido por autorizacao real ou substituido por eventos internos da aplicacao.
 - Nao ha outbox transacional. Se o PostgreSQL salvar e o Redis falhar em seguida, a notificacao persiste, mas o evento em tempo real pode nao ser publicado.
 - Nao ha Prometheus; `/metrics` retorna apenas contadores simples.
+- O modo de desenvolvimento usa `tsx watch`, que reinicia o processo. Por isso
+  nao foi necessario guardar singletons em `globalThis`; em HMR dentro do mesmo
+  processo, essa decisao deveria ser reavaliada.
 
 ## Melhorias para producao
 

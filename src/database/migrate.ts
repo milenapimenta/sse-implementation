@@ -1,8 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { Pool } from "pg";
-import { env } from "../config/env";
-import { createPgPool } from "./postgres";
+import type { Pool } from "pg";
+import { closePostgresPool, getPostgresPool } from "./postgres";
 
 const DEFAULT_MIGRATIONS_DIR = path.resolve(process.cwd(), "migrations");
 
@@ -33,29 +32,33 @@ export async function runMigrations(
 
     const sql = await fs.readFile(path.join(migrationsDir, filename), "utf8");
 
-    await pool.query("begin");
+    const client = await pool.connect();
+
     try {
-      await pool.query(sql);
-      await pool.query(
+      await client.query("begin");
+      await client.query(sql);
+      await client.query(
         "insert into schema_migrations (filename) values ($1)",
         [filename]
       );
-      await pool.query("commit");
+      await client.query("commit");
       console.log(`Applied migration ${filename}`);
     } catch (error) {
-      await pool.query("rollback");
+      await client.query("rollback");
       throw error;
+    } finally {
+      client.release();
     }
   }
 }
 
 async function main() {
-  const pool = createPgPool(env);
+  const pool = getPostgresPool();
 
   try {
     await runMigrations(pool);
   } finally {
-    await pool.end();
+    await closePostgresPool();
   }
 }
 

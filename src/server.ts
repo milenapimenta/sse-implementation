@@ -1,44 +1,40 @@
 import http from "node:http";
 import { createApp } from "./app";
 import { env } from "./config/env";
-import { checkPostgres, createPgPool, waitForPostgres } from "./database/postgres";
+import {
+  checkPostgres,
+  closePostgresPool,
+  getPostgresPool,
+  getPostgresPoolMetrics,
+  waitForPostgres
+} from "./database/postgres";
+import { registerGracefulShutdown } from "./lifecycle/shutdown";
 import { NotificationController } from "./modules/notifications/notification.controller";
 import { NotificationRepository } from "./modules/notifications/notification.repository";
 import { createNotificationRoutes } from "./modules/notifications/notification.routes";
 import { NotificationService } from "./modules/notifications/notification.service";
 import {
+  checkRedis,
   closeRedisClients,
-  createRedisClients,
-  subscribeToNotifications,
-  waitForRedis
+  connectRedisClient,
+  getRedisClients,
+  getRedisStatusMetrics,
+  initializeNotificationSubscriber
 } from "./redis/redis";
 import { createSseHandler } from "./sse/sse-handler";
 import { SseManager } from "./sse/sse-manager";
 import { createLogger } from "./utils/logger";
-import { wait } from "./utils/wait";
 
 const logger = createLogger(env);
 
 async function main(): Promise<void> {
-  const pool = createPgPool(env);
-  const redisClients = createRedisClients(env);
-
-  pool.on("error", (error) => {
-    logger.error({ err: error }, "postgres pool error");
-  });
-
-  for (const [name, client] of Object.entries(redisClients)) {
-    client.on("error", (error: Error) => {
-      logger.error({ err: error, client: name }, "redis client error");
-    });
-  }
+  const pool = getPostgresPool({ env, logger });
+  const redisClients = getRedisClients({ env, logger });
 
   await waitForPostgres(pool, logger);
-  await waitForRedis(redisClients.general, logger);
-  await Promise.all([
-    redisClients.publisher.connect(),
-    redisClients.subscriber.connect()
-  ]);
+  await connectRedisClient("command", { env, logger });
+  await connectRedisClient("publisher", { env, logger });
+  await checkRedis(redisClients.general);
 
   const repository = new NotificationRepository(pool);
   const sseManager = new SseManager(logger);
@@ -56,8 +52,8 @@ async function main(): Promise<void> {
     logger
   });
 
-  await subscribeToNotifications({
-    subscriber: redisClients.subscriber,
+  await initializeNotificationSubscriber({
+    env,
     sseManager,
     logger
   });
@@ -69,8 +65,12 @@ async function main(): Promise<void> {
     sseManager,
     healthChecks: {
       postgres: () => checkPostgres(pool),
-      redis: () => redisClients.general.ping().then(() => undefined)
-    }
+      redis: () => checkRedis(redisClients.general)
+    },
+    resourceMetrics: () => ({
+      postgres: getPostgresPoolMetrics(),
+      redis: getRedisStatusMetrics()
+    })
   });
 
   const server = http.createServer(app);
@@ -84,43 +84,12 @@ async function main(): Promise<void> {
 
   logger.info({ port: env.PORT }, "api started");
 
-  let shuttingDown = false;
-  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
-    if (shuttingDown) {
-      return;
-    }
-
-    shuttingDown = true;
-    logger.info({ signal }, "graceful shutdown started");
-
-    const closeServer = new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve();
-      });
-    });
-
-    sseManager.closeAll({
-      event: "shutdown",
-      data: { reason: "server_shutdown" }
-    });
-
-    await Promise.race([closeServer, wait(5000)]);
-    await closeRedisClients(redisClients);
-    await pool.end();
-
-    logger.info("graceful shutdown finished");
-  };
-
-  process.once("SIGINT", () => {
-    void shutdown("SIGINT").then(() => process.exit(0));
-  });
-  process.once("SIGTERM", () => {
-    void shutdown("SIGTERM").then(() => process.exit(0));
+  registerGracefulShutdown({
+    server,
+    sseManager,
+    logger,
+    closeRedisClients,
+    closePostgresPool
   });
 }
 

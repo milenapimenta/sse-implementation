@@ -4,16 +4,26 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { createApp } from "../app";
 import { loadEnv, type Env } from "../config/env";
 import { runMigrations } from "../database/migrate";
-import { checkPostgres, createPgPool } from "../database/postgres";
+import {
+  checkPostgres,
+  closePostgresPool,
+  getPostgresPool,
+  getPostgresPoolMetrics,
+  resetPostgresPoolForTests
+} from "../database/postgres";
 import { NotificationController } from "../modules/notifications/notification.controller";
 import { NotificationRepository } from "../modules/notifications/notification.repository";
 import { createNotificationRoutes } from "../modules/notifications/notification.routes";
 import { NotificationService } from "../modules/notifications/notification.service";
 import {
+  checkRedis,
   closeRedisClients,
-  createRedisClients,
-  type RedisClients,
-  subscribeToNotifications
+  connectRedisClients,
+  getRedisClients,
+  getRedisStatusMetrics,
+  initializeNotificationSubscriber,
+  resetRedisClientsForTests,
+  type RedisClients
 } from "../redis/redis";
 import { createSseHandler } from "../sse/sse-handler";
 import { SseManager } from "../sse/sse-manager";
@@ -226,22 +236,21 @@ describe.skipIf(!runIntegration)("SSE integration", () => {
       SSE_RETRY_MS: 50
     };
     logger = createTestLogger();
-    pool = createPgPool(config);
-    redisClients = createRedisClients(config);
+    await resetPostgresPoolForTests();
+    await resetRedisClientsForTests();
+
+    pool = getPostgresPool({ env: config, logger });
+    redisClients = getRedisClients({ env: config, logger });
 
     await runMigrations(pool);
-    await Promise.all([
-      redisClients.publisher.connect(),
-      redisClients.subscriber.connect(),
-      redisClients.general.connect()
-    ]);
+    await connectRedisClients({ env: config, logger });
 
     repository = new NotificationRepository(pool);
     service = new NotificationService(repository, redisClients.publisher, logger);
     sseManager = new SseManager(logger);
 
-    await subscribeToNotifications({
-      subscriber: redisClients.subscriber,
+    await initializeNotificationSubscriber({
+      env: config,
       sseManager,
       logger
     });
@@ -262,8 +271,12 @@ describe.skipIf(!runIntegration)("SSE integration", () => {
       sseManager,
       healthChecks: {
         postgres: () => checkPostgres(pool),
-        redis: () => redisClients.general.ping().then(() => undefined)
-      }
+        redis: () => checkRedis(redisClients.general)
+      },
+      resourceMetrics: () => ({
+        postgres: getPostgresPoolMetrics(),
+        redis: getRedisStatusMetrics()
+      })
     });
 
     server = http.createServer(app);
@@ -297,8 +310,10 @@ describe.skipIf(!runIntegration)("SSE integration", () => {
         resolve();
       });
     });
-    await closeRedisClients(redisClients);
-    await pool.end();
+    await closeRedisClients();
+    await closePostgresPool();
+    await resetRedisClientsForTests();
+    await resetPostgresPoolForTests();
   });
 
   it("delivers a created notification only to the target user and persists it", async () => {

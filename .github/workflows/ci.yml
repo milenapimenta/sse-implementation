@@ -64,17 +64,15 @@ jobs:
 
       - name: Wait for PostgreSQL and Redis
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
 
-          for attempt in {1..30}; do
-            if docker exec \
-              "${{ job.services.postgres.id }}" \
-              pg_isready -U postgres -d notifications_test
-            then
+          for attempt in $(seq 1 30); do
+            if docker exec "${{ job.services.postgres.id }}" \
+              pg_isready -U postgres -d notifications_test; then
               break
             fi
 
-            if [ "$attempt" -eq 30 ]; then
+            if [ "${attempt}" -eq 30 ]; then
               echo "PostgreSQL did not become healthy in time"
               exit 1
             fi
@@ -82,16 +80,13 @@ jobs:
             sleep 1
           done
 
-          for attempt in {1..30}; do
-            if docker exec \
-              "${{ job.services.redis.id }}" \
-              redis-cli ping |
-              grep -q PONG
-            then
+          for attempt in $(seq 1 30); do
+            if docker exec "${{ job.services.redis.id }}" \
+              redis-cli ping | grep -q PONG; then
               break
             fi
 
-            if [ "$attempt" -eq 30 ]; then
+            if [ "${attempt}" -eq 30 ]; then
               echo "Redis did not become healthy in time"
               exit 1
             fi
@@ -118,16 +113,14 @@ jobs:
         run: npm run build
 
   continuous-deployment:
-    name: Build image and deploy to EC2
+    name: Build images and deploy to EC2
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     needs:
       - continuous-integration
 
-    if: >
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main'
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
     permissions:
       contents: read
@@ -151,40 +144,40 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-     - name: Build and push API and frontend images
-  env:
-    ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-    ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-    IMAGE_TAG: ${{ github.sha }}
-  run: |
-    set -Eeuo pipefail
+      - name: Build and push API and frontend images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
 
-    IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}"
 
-    echo "Building API..."
+          echo "Building API..."
 
-    docker build \
-      --tag "${IMAGE_URI}:api-${IMAGE_TAG}" \
-      --tag "${IMAGE_URI}:api-latest" \
-      .
+          docker build \
+            --tag "${IMAGE_URI}:api-${IMAGE_TAG}" \
+            --tag "${IMAGE_URI}:api-latest" \
+            .
 
-    echo "Building frontend..."
+          echo "Building frontend..."
 
-    docker build \
-      --build-arg VITE_API_URL= \
-      --tag "${IMAGE_URI}:frontend-${IMAGE_TAG}" \
-      --tag "${IMAGE_URI}:frontend-latest" \
-      ./frontend
+          docker build \
+            --build-arg VITE_API_URL= \
+            --tag "${IMAGE_URI}:frontend-${IMAGE_TAG}" \
+            --tag "${IMAGE_URI}:frontend-latest" \
+            ./frontend
 
-    echo "Pushing API..."
+          echo "Pushing API..."
 
-    docker push "${IMAGE_URI}:api-${IMAGE_TAG}"
-    docker push "${IMAGE_URI}:api-latest"
+          docker push "${IMAGE_URI}:api-${IMAGE_TAG}"
+          docker push "${IMAGE_URI}:api-latest"
 
-    echo "Pushing frontend..."
+          echo "Pushing frontend..."
 
-    docker push "${IMAGE_URI}:frontend-${IMAGE_TAG}"
-    docker push "${IMAGE_URI}:frontend-latest"
+          docker push "${IMAGE_URI}:frontend-${IMAGE_TAG}"
+          docker push "${IMAGE_URI}:frontend-latest"
 
       - name: Deploy on EC2 through Systems Manager
         env:

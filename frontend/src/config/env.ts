@@ -2,8 +2,12 @@ interface AppConfig {
   apiUrl: string;
 }
 
+function getDefaultApiUrl(): string {
+  return window.location.origin;
+}
+
 function normalizeApiUrl(value: string | undefined): string {
-  const candidate = value?.trim() || "http://localhost:3000";
+  const candidate = value?.trim() || getDefaultApiUrl();
 
   try {
     const url = new URL(candidate);

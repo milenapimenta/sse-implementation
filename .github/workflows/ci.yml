@@ -151,23 +151,40 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          set -Eeuo pipefail
+     - name: Build and push API and frontend images
+  env:
+    ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+    ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+    IMAGE_TAG: ${{ github.sha }}
+  run: |
+    set -Eeuo pipefail
 
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+    IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}"
 
-          docker build \
-            --tag "${IMAGE_URI}:${IMAGE_TAG}" \
-            --tag "${IMAGE_URI}:latest" \
-            .
+    echo "Building API..."
 
-          docker push "${IMAGE_URI}:${IMAGE_TAG}"
-          docker push "${IMAGE_URI}:latest"
+    docker build \
+      --tag "${IMAGE_URI}:api-${IMAGE_TAG}" \
+      --tag "${IMAGE_URI}:api-latest" \
+      .
+
+    echo "Building frontend..."
+
+    docker build \
+      --build-arg VITE_API_URL= \
+      --tag "${IMAGE_URI}:frontend-${IMAGE_TAG}" \
+      --tag "${IMAGE_URI}:frontend-latest" \
+      ./frontend
+
+    echo "Pushing API..."
+
+    docker push "${IMAGE_URI}:api-${IMAGE_TAG}"
+    docker push "${IMAGE_URI}:api-latest"
+
+    echo "Pushing frontend..."
+
+    docker push "${IMAGE_URI}:frontend-${IMAGE_TAG}"
+    docker push "${IMAGE_URI}:frontend-latest"
 
       - name: Deploy on EC2 through Systems Manager
         env:

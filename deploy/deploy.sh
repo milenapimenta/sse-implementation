@@ -146,25 +146,13 @@ echo "==> Aguardando PostgreSQL e Redis"
 wait_for_container "estudo-sse-postgres" 30 5
 wait_for_container "estudo-sse-redis" 30 5
 
-echo "==> Verificando migrações de produção"
+echo "==> Executando migrações de produção"
 
-if "${COMPOSE_COMMAND[@]}" run \
+"${COMPOSE_COMMAND[@]}" run \
   --rm \
   --no-deps \
   api \
-  node -e \
-  "const packageJson = require('./package.json'); process.exit(packageJson.scripts?.['db:migrate'] ? 0 : 1)"
-then
-  echo "==> Executando npm run db:migrate"
-
-  "${COMPOSE_COMMAND[@]}" run \
-    --rm \
-    --no-deps \
-    api \
-    npm run db:migrate
-else
-  echo "Script db:migrate não encontrado. Migração automática ignorada."
-fi
+  npm run migrate:prod
 
 echo "==> Atualizando API e frontend"
 

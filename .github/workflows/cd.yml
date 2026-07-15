@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: production-deployment
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
@@ -29,30 +29,83 @@ env:
   SSM_PARAMETER_NAME: ${{ vars.SSM_PARAMETER_NAME }}
 
 jobs:
+  deployment-guard:
+    name: Decide whether deployment should run
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      deploy_sha: ${{ steps.decision.outputs.deploy_sha }}
+      should_deploy: ${{ steps.decision.outputs.should_deploy }}
+
+    steps:
+      - name: Decide deployment eligibility
+        id: decision
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_SHA: ${{ github.sha }}
+          WORKFLOW_RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_RUN_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+
+          should_deploy=false
+          deploy_sha="${MANUAL_SHA}"
+          reason="Manual deployment requested."
+
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            deploy_sha="${WORKFLOW_RUN_SHA}"
+
+            if [[ "${WORKFLOW_RUN_CONCLUSION}" != "success" ]]; then
+              reason="CI did not finish successfully."
+            elif [[ "${WORKFLOW_RUN_EVENT}" != "push" ]]; then
+              reason="CI was not triggered by a push."
+            elif [[ "${WORKFLOW_RUN_BRANCH}" != "main" ]]; then
+              reason="CI did not run for main."
+            else
+              latest_sha="$(
+                curl \
+                  --fail \
+                  --silent \
+                  --show-error \
+                  --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+                  --header "Accept: application/vnd.github+json" \
+                  "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" |
+                  jq --raw-output '.object.sha'
+              )"
+
+              if [[ "${deploy_sha}" == "${latest_sha}" ]]; then
+                should_deploy=true
+                reason="CI passed for the latest main revision."
+              else
+                reason="Skipping stale revision ${deploy_sha}; latest main is ${latest_sha}."
+              fi
+            fi
+          else
+            should_deploy=true
+          fi
+
+          echo "deploy_sha=${deploy_sha}" >> "${GITHUB_OUTPUT}"
+          echo "should_deploy=${should_deploy}" >> "${GITHUB_OUTPUT}"
+          echo "${reason}"
+
   deploy:
     name: Build images and deploy to EC2
+    needs: deployment-guard
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    if: >-
-      ${{
-        github.event_name == 'workflow_dispatch' ||
-        (
-          github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.event == 'push'
-        )
-      }}
+    if: ${{ needs.deployment-guard.outputs.should_deploy == 'true' }}
 
     steps:
       - name: Checkout approved revision
         uses: actions/checkout@v7
         with:
-          ref: >-
-            ${{
-              github.event_name == 'workflow_run' &&
-              github.event.workflow_run.head_sha ||
-              github.sha
-            }}
+          ref: ${{ needs.deployment-guard.outputs.deploy_sha }}
 
       - name: Identify revision
         id: revision

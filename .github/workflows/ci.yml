@@ -3,9 +3,14 @@ name: Continuous Integration
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   api:
@@ -14,6 +19,7 @@ jobs:
     timeout-minutes: 15
 
     env:
+      CI: true
       NODE_ENV: test
       LOG_LEVEL: silent
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/notifications_test
@@ -36,6 +42,7 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+          --health-start-period 5s
 
       redis:
         image: redis:7-alpine
@@ -48,13 +55,14 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+          --health-start-period 5s
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
@@ -63,39 +71,50 @@ jobs:
       - name: Install API dependencies
         run: npm ci
 
-      - name: Wait for PostgreSQL and Redis
+      - name: Wait for PostgreSQL
+        shell: bash
         run: |
           set -Eeuo pipefail
 
           for attempt in $(seq 1 30); do
             if docker exec "${{ job.services.postgres.id }}" \
-              pg_isready -U postgres -d notifications_test
+              pg_isready \
+                --username postgres \
+                --dbname notifications_test
             then
-              break
+              echo "PostgreSQL is ready."
+              exit 0
             fi
 
-            if [ "${attempt}" -eq 30 ]; then
-              echo "PostgreSQL did not become healthy in time."
-              exit 1
-            fi
-
+            echo "Waiting for PostgreSQL: attempt ${attempt}/30"
             sleep 1
           done
+
+          echo "PostgreSQL did not become ready in time."
+          docker logs "${{ job.services.postgres.id }}" || true
+          exit 1
+
+      - name: Wait for Redis
+        shell: bash
+        run: |
+          set -Eeuo pipefail
 
           for attempt in $(seq 1 30); do
             if docker exec "${{ job.services.redis.id }}" \
-              redis-cli ping | grep -q PONG
+              redis-cli ping |
+              grep --quiet PONG
             then
-              break
+              echo "Redis is ready."
+              exit 0
             fi
 
-            if [ "${attempt}" -eq 30 ]; then
-              echo "Redis did not become healthy in time."
-              exit 1
-            fi
-
+            echo "Waiting for Redis: attempt ${attempt}/30"
             sleep 1
           done
+
+          echo "Redis did not become ready in time."
+          docker logs "${{ job.services.redis.id }}" || true
+          exit 1
 
       - name: Run API lint
         run: npm run lint
@@ -124,12 +143,16 @@ jobs:
       run:
         working-directory: frontend
 
+    env:
+      CI: true
+      VITE_API_URL: ""
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
@@ -139,13 +162,13 @@ jobs:
         run: npm ci
 
       - name: Run frontend lint
-        run: npm run lint --if-present
+        run: npm run --if-present lint
 
       - name: Check frontend TypeScript
-        run: npm run typecheck --if-present
+        run: npm run --if-present typecheck
 
       - name: Run frontend unit tests
-        run: npm run test:unit --if-present
+        run: npm run --if-present test:unit
 
       - name: Build frontend
         run: npm run build

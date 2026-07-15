@@ -22,8 +22,10 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
   EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+
   ECR_API_REPOSITORY: ${{ vars.ECR_API_REPOSITORY }}
   ECR_FRONTEND_REPOSITORY: ${{ vars.ECR_FRONTEND_REPOSITORY }}
+
   SSM_PARAMETER_NAME: ${{ vars.SSM_PARAMETER_NAME }}
 
 jobs:
@@ -63,6 +65,18 @@ jobs:
           echo "sha=${REVISION}" >> "${GITHUB_OUTPUT}"
           echo "Deploying revision: ${REVISION}"
 
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          : "${AWS_REGION:?Configure a variável AWS_REGION}"
+          : "${AWS_ACCOUNT_ID:?Configure a variável AWS_ACCOUNT_ID}"
+          : "${EC2_INSTANCE_ID:?Configure a variável EC2_INSTANCE_ID}"
+          : "${ECR_API_REPOSITORY:?Configure ECR_API_REPOSITORY}"
+          : "${ECR_FRONTEND_REPOSITORY:?Configure ECR_FRONTEND_REPOSITORY}"
+          : "${SSM_PARAMETER_NAME:?Configure SSM_PARAMETER_NAME}"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -73,7 +87,10 @@ jobs:
           mask-aws-account-id: true
 
       - name: Validate AWS identity
-        run: aws sts get-caller-identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          aws sts get-caller-identity
 
       - name: Login to Amazon ECR
         id: ecr-login
@@ -91,19 +108,23 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          API_IMAGE_BASE="${ECR_REGISTRY}/${ECR_API_REPOSITORY}"
+          FRONTEND_IMAGE_BASE="${ECR_REGISTRY}/${ECR_FRONTEND_REPOSITORY}"
 
-          echo "api_image=${IMAGE_BASE}:api-${IMAGE_TAG}" \
+          echo "api_image=${API_IMAGE_BASE}:${IMAGE_TAG}" \
             >> "${GITHUB_OUTPUT}"
 
-          echo "api_latest=${IMAGE_BASE}:api-latest" \
+          echo "api_latest=${API_IMAGE_BASE}:latest" \
             >> "${GITHUB_OUTPUT}"
 
-          echo "frontend_image=${IMAGE_BASE}:frontend-${IMAGE_TAG}" \
+          echo "frontend_image=${FRONTEND_IMAGE_BASE}:${IMAGE_TAG}" \
             >> "${GITHUB_OUTPUT}"
 
-          echo "frontend_latest=${IMAGE_BASE}:frontend-latest" \
+          echo "frontend_latest=${FRONTEND_IMAGE_BASE}:latest" \
             >> "${GITHUB_OUTPUT}"
+
+          echo "API image: ${API_IMAGE_BASE}:${IMAGE_TAG}"
+          echo "Frontend image: ${FRONTEND_IMAGE_BASE}:${IMAGE_TAG}"
 
       - name: Build and push API
         uses: docker/build-push-action@v7
@@ -118,6 +139,9 @@ jobs:
 
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
+
+          provenance: true
+          sbom: true
 
       - name: Build and push frontend
         uses: docker/build-push-action@v7
@@ -136,6 +160,9 @@ jobs:
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
 
+          provenance: true
+          sbom: true
+
       - name: Prepare Systems Manager command
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -143,6 +170,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+
+          test -f docker-compose.production.yml
+          test -f deploy/deploy.sh
 
           python3 <<'PY'
           import base64
@@ -173,9 +203,22 @@ jobs:
 
           aws_region = os.environ["AWS_REGION"]
           ecr_registry = os.environ["ECR_REGISTRY"]
-          ecr_repository = os.environ["ECR_REPOSITORY"]
+          api_repository = os.environ["ECR_API_REPOSITORY"]
+          frontend_repository = os.environ[
+              "ECR_FRONTEND_REPOSITORY"
+          ]
           image_tag = os.environ["IMAGE_TAG"]
           parameter_name = os.environ["SSM_PARAMETER_NAME"]
+
+          compose_path = (
+              deploy_directory
+              + "/docker-compose.production.yml"
+          )
+
+          deploy_script_path = (
+              deploy_directory
+              + "/deploy.sh"
+          )
 
           commands = [
               "set -Eeuo pipefail",
@@ -188,27 +231,34 @@ jobs:
               (
                   f"printf '%s' {quote(compose_base64)} "
                   f"| base64 --decode "
-                  f"> {quote(deploy_directory + '/docker-compose.production.yml')}"
+                  f"> {quote(compose_path)}"
               ),
 
               (
                   f"printf '%s' {quote(deploy_script_base64)} "
                   f"| base64 --decode "
-                  f"> {quote(deploy_directory + '/deploy.sh')}"
+                  f"> {quote(deploy_script_path)}"
+              ),
+
+              (
+                  f"chmod 0600 "
+                  f"{quote(compose_path)}"
               ),
 
               (
                   f"chmod 0700 "
-                  f"{quote(deploy_directory + '/deploy.sh')}"
+                  f"{quote(deploy_script_path)}"
               ),
 
               (
                   f"AWS_REGION={quote(aws_region)} "
                   f"ECR_REGISTRY={quote(ecr_registry)} "
-                  f"ECR_REPOSITORY={quote(ecr_repository)} "
+                  f"ECR_API_REPOSITORY={quote(api_repository)} "
+                  f"ECR_FRONTEND_REPOSITORY="
+                  f"{quote(frontend_repository)} "
                   f"IMAGE_TAG={quote(image_tag)} "
                   f"SSM_PARAMETER_NAME={quote(parameter_name)} "
-                  f"{quote(deploy_directory + '/deploy.sh')}"
+                  f"{quote(deploy_script_path)}"
               ),
           ]
 
@@ -217,6 +267,8 @@ jobs:
               encoding="utf-8",
           )
           PY
+
+          jq empty ssm-commands.json
 
       - name: Deploy through Systems Manager
         id: deploy
@@ -236,7 +288,9 @@ jobs:
               --output text
           )"
 
-          echo "command_id=${COMMAND_ID}" >> "${GITHUB_OUTPUT}"
+          echo "command_id=${COMMAND_ID}" \
+            >> "${GITHUB_OUTPUT}"
+
           echo "SSM command ID: ${COMMAND_ID}"
 
           aws ssm wait command-executed \
@@ -248,6 +302,8 @@ jobs:
         if: always() && steps.deploy.outputs.command_id != ''
         shell: bash
         run: |
+          set -Eeuo pipefail
+
           aws ssm get-command-invocation \
             --region "${AWS_REGION}" \
             --command-id "${{ steps.deploy.outputs.command_id }}" \

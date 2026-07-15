@@ -1,0 +1,116 @@
+name: estudo-sse-production
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: estudo-sse-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER não definido}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD não definido}
+      POSTGRES_DB: ${POSTGRES_DB:-notifications}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - estudo-sse-network
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-notifications}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: estudo-sse-redis
+    restart: unless-stopped
+
+    networks:
+      - estudo-sse-network
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  api:
+    image: ${API_IMAGE:?API_IMAGE não definida}
+    container_name: estudo-sse-api
+    restart: unless-stopped
+    init: true
+
+    environment:
+      PORT: 3000
+
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL não definida}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-10}
+      DATABASE_IDLE_TIMEOUT_MS: ${DATABASE_IDLE_TIMEOUT_MS:-30000}
+      DATABASE_CONNECTION_TIMEOUT_MS: ${DATABASE_CONNECTION_TIMEOUT_MS:-5000}
+
+      REDIS_URL: redis://redis:6379
+
+      SSE_HEARTBEAT_INTERVAL_MS: ${SSE_HEARTBEAT_INTERVAL_MS:-15000}
+      SSE_RETRY_MS: ${SSE_RETRY_MS:-3000}
+
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN não definida}
+      NODE_ENV: production
+
+    expose:
+      - "3000"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+    stop_grace_period: 30s
+
+    networks:
+      - estudo-sse-network
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE não definida}
+    container_name: estudo-sse-frontend
+    restart: unless-stopped
+
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+
+    depends_on:
+      api:
+        condition: service_healthy
+
+    networks:
+      - estudo-sse-network
+
+volumes:
+  postgres_data:
+    name: estudo-sse-postgres-data
+
+networks:
+  estudo-sse-network:
+    name: estudo-sse-network

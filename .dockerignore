@@ -1,8 +1,11 @@
 node_modules
 dist
 coverage
-.env
 .git
+.github
+frontend
+.env
+.env.*
 npm-debug.log
-Dockerfile
-docker-compose.yml
+README.md
+docker-compose*.yml

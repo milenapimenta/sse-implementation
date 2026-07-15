@@ -1,0 +1,259 @@
+name: Continuous Deployment
+
+on:
+  workflow_run:
+    workflows:
+      - Continuous Integration
+    types:
+      - completed
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+  ECR_API_REPOSITORY: ${{ vars.ECR_API_REPOSITORY }}
+  ECR_FRONTEND_REPOSITORY: ${{ vars.ECR_FRONTEND_REPOSITORY }}
+  SSM_PARAMETER_NAME: ${{ vars.SSM_PARAMETER_NAME }}
+
+jobs:
+  deploy:
+    name: Build images and deploy to EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push'
+        )
+      }}
+
+    steps:
+      - name: Checkout approved revision
+        uses: actions/checkout@v7
+        with:
+          ref: >-
+            ${{
+              github.event_name == 'workflow_run' &&
+              github.event.workflow_run.head_sha ||
+              github.sha
+            }}
+
+      - name: Identify revision
+        id: revision
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          REVISION="$(git rev-parse HEAD)"
+
+          echo "sha=${REVISION}" >> "${GITHUB_OUTPUT}"
+          echo "Deploying revision: ${REVISION}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+
+      - name: Validate AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Define image names
+        id: images
+        shell: bash
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.revision.outputs.sha }}
+        run: |
+          set -Eeuo pipefail
+
+          IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+
+          echo "api_image=${IMAGE_BASE}:api-${IMAGE_TAG}" \
+            >> "${GITHUB_OUTPUT}"
+
+          echo "api_latest=${IMAGE_BASE}:api-latest" \
+            >> "${GITHUB_OUTPUT}"
+
+          echo "frontend_image=${IMAGE_BASE}:frontend-${IMAGE_TAG}" \
+            >> "${GITHUB_OUTPUT}"
+
+          echo "frontend_latest=${IMAGE_BASE}:frontend-latest" \
+            >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push API
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+
+          tags: |
+            ${{ steps.images.outputs.api_image }}
+            ${{ steps.images.outputs.api_latest }}
+
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+
+          build-args: |
+            VITE_API_URL=
+
+          tags: |
+            ${{ steps.images.outputs.frontend_image }}
+            ${{ steps.images.outputs.frontend_latest }}
+
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Prepare Systems Manager command
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.revision.outputs.sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          python3 <<'PY'
+          import base64
+          import json
+          import os
+          import shlex
+          from pathlib import Path
+
+          deploy_directory = "/opt/estudo-sse"
+
+          compose_content = Path(
+              "docker-compose.production.yml"
+          ).read_bytes()
+
+          deploy_script_content = Path(
+              "deploy/deploy.sh"
+          ).read_bytes()
+
+          compose_base64 = base64.b64encode(
+              compose_content
+          ).decode("ascii")
+
+          deploy_script_base64 = base64.b64encode(
+              deploy_script_content
+          ).decode("ascii")
+
+          quote = shlex.quote
+
+          aws_region = os.environ["AWS_REGION"]
+          ecr_registry = os.environ["ECR_REGISTRY"]
+          ecr_repository = os.environ["ECR_REPOSITORY"]
+          image_tag = os.environ["IMAGE_TAG"]
+          parameter_name = os.environ["SSM_PARAMETER_NAME"]
+
+          commands = [
+              "set -Eeuo pipefail",
+
+              (
+                  f"install -d -m 0700 "
+                  f"{quote(deploy_directory)}"
+              ),
+
+              (
+                  f"printf '%s' {quote(compose_base64)} "
+                  f"| base64 --decode "
+                  f"> {quote(deploy_directory + '/docker-compose.production.yml')}"
+              ),
+
+              (
+                  f"printf '%s' {quote(deploy_script_base64)} "
+                  f"| base64 --decode "
+                  f"> {quote(deploy_directory + '/deploy.sh')}"
+              ),
+
+              (
+                  f"chmod 0700 "
+                  f"{quote(deploy_directory + '/deploy.sh')}"
+              ),
+
+              (
+                  f"AWS_REGION={quote(aws_region)} "
+                  f"ECR_REGISTRY={quote(ecr_registry)} "
+                  f"ECR_REPOSITORY={quote(ecr_repository)} "
+                  f"IMAGE_TAG={quote(image_tag)} "
+                  f"SSM_PARAMETER_NAME={quote(parameter_name)} "
+                  f"{quote(deploy_directory + '/deploy.sh')}"
+              ),
+          ]
+
+          Path("ssm-commands.json").write_text(
+              json.dumps({"commands": commands}),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Deploy through Systems Manager
+        id: deploy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          COMMAND_ID="$(
+            aws ssm send-command \
+              --region "${AWS_REGION}" \
+              --instance-ids "${EC2_INSTANCE_ID}" \
+              --document-name "AWS-RunShellScript" \
+              --comment "Deploy ${GITHUB_REPOSITORY}@${{ steps.revision.outputs.sha }}" \
+              --parameters file://ssm-commands.json \
+              --timeout-seconds 1200 \
+              --query "Command.CommandId" \
+              --output text
+          )"
+
+          echo "command_id=${COMMAND_ID}" >> "${GITHUB_OUTPUT}"
+          echo "SSM command ID: ${COMMAND_ID}"
+
+          aws ssm wait command-executed \
+            --region "${AWS_REGION}" \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${EC2_INSTANCE_ID}"
+
+      - name: Show deployment result
+        if: always() && steps.deploy.outputs.command_id != ''
+        shell: bash
+        run: |
+          aws ssm get-command-invocation \
+            --region "${AWS_REGION}" \
+            --command-id "${{ steps.deploy.outputs.command_id }}" \
+            --instance-id "${EC2_INSTANCE_ID}" \
+            --query '{
+              Status: Status,
+              Output: StandardOutputContent,
+              Error: StandardErrorContent
+            }'

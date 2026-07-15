@@ -1,4 +1,4 @@
-name: Continuous Integration and Deployment
+name: Continuous Integration
 
 on:
   push:
@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  continuous-integration:
-    name: Lint, Typecheck, Tests and Build
+  api:
+    name: API - Lint, Typecheck, Tests and Build
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -51,15 +51,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: Install dependencies
+      - name: Install API dependencies
         run: npm ci
 
       - name: Wait for PostgreSQL and Redis
@@ -68,12 +69,13 @@ jobs:
 
           for attempt in $(seq 1 30); do
             if docker exec "${{ job.services.postgres.id }}" \
-              pg_isready -U postgres -d notifications_test; then
+              pg_isready -U postgres -d notifications_test
+            then
               break
             fi
 
             if [ "${attempt}" -eq 30 ]; then
-              echo "PostgreSQL did not become healthy in time"
+              echo "PostgreSQL did not become healthy in time."
               exit 1
             fi
 
@@ -82,158 +84,68 @@ jobs:
 
           for attempt in $(seq 1 30); do
             if docker exec "${{ job.services.redis.id }}" \
-              redis-cli ping | grep -q PONG; then
+              redis-cli ping | grep -q PONG
+            then
               break
             fi
 
             if [ "${attempt}" -eq 30 ]; then
-              echo "Redis did not become healthy in time"
+              echo "Redis did not become healthy in time."
               exit 1
             fi
 
             sleep 1
           done
 
-      - name: Run lint
+      - name: Run API lint
         run: npm run lint
 
-      - name: Check TypeScript
+      - name: Check API TypeScript
         run: npm run typecheck
 
       - name: Prepare test database
         run: npm run db:migrate:test
 
-      - name: Run unit tests
+      - name: Run API unit tests
         run: npm run test:unit
 
-      - name: Run integration tests
+      - name: Run API integration tests
         run: npm run test:integration
 
-      - name: Build application
+      - name: Build API
         run: npm run build
 
-  continuous-deployment:
-    name: Build images and deploy to EC2
+  frontend:
+    name: Frontend - Checks and Build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
-    needs:
-      - continuous-integration
-
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-    permissions:
-      contents: read
-      id-token: write
-
-    concurrency:
-      group: production-deployment
-      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: frontend
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Install frontend dependencies
+        run: npm ci
 
-      - name: Build and push API and frontend images
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          set -Eeuo pipefail
+      - name: Run frontend lint
+        run: npm run lint --if-present
 
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+      - name: Check frontend TypeScript
+        run: npm run typecheck --if-present
 
-          echo "Building API..."
+      - name: Run frontend unit tests
+        run: npm run test:unit --if-present
 
-          docker build \
-            --tag "${IMAGE_URI}:api-${IMAGE_TAG}" \
-            --tag "${IMAGE_URI}:api-latest" \
-            .
-
-          echo "Building frontend..."
-
-          docker build \
-            --build-arg VITE_API_URL= \
-            --tag "${IMAGE_URI}:frontend-${IMAGE_TAG}" \
-            --tag "${IMAGE_URI}:frontend-latest" \
-            ./frontend
-
-          echo "Pushing API..."
-
-          docker push "${IMAGE_URI}:api-${IMAGE_TAG}"
-          docker push "${IMAGE_URI}:api-latest"
-
-          echo "Pushing frontend..."
-
-          docker push "${IMAGE_URI}:frontend-${IMAGE_TAG}"
-          docker push "${IMAGE_URI}:frontend-latest"
-
-      - name: Deploy on EC2 through Systems Manager
-        env:
-          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          set -Eeuo pipefail
-
-          PARAMETERS=$(jq -cn \
-            --arg command "sudo /opt/sse-project/deploy.sh ${IMAGE_TAG}" \
-            '{commands: [$command]}')
-
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "${INSTANCE_ID}" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy commit ${IMAGE_TAG}" \
-            --parameters "${PARAMETERS}" \
-            --query "Command.CommandId" \
-            --output text)
-
-          echo "SSM command ID: ${COMMAND_ID}"
-
-          STATUS="Pending"
-
-          for attempt in $(seq 1 90); do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "${COMMAND_ID}" \
-              --instance-id "${INSTANCE_ID}" \
-              --query "Status" \
-              --output text 2>/dev/null || echo "Pending")
-
-            echo "Deploy status: ${STATUS}"
-
-            case "${STATUS}" in
-              Success)
-                break
-                ;;
-
-              Failed|Cancelled|TimedOut|Cancelling)
-                break
-                ;;
-            esac
-
-            sleep 5
-          done
-
-          aws ssm get-command-invocation \
-            --command-id "${COMMAND_ID}" \
-            --instance-id "${INSTANCE_ID}" \
-            --query '{
-              Status: Status,
-              Output: StandardOutputContent,
-              Error: StandardErrorContent
-            }'
-
-          if [ "${STATUS}" != "Success" ]; then
-            echo "O deploy falhou com status: ${STATUS}"
-            exit 1
-          fi
+      - name: Build frontend
+        run: npm run build

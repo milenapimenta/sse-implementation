@@ -16,6 +16,79 @@ ENV_FILE="${DEPLOY_DIRECTORY}/.env.production"
 API_IMAGE="${ECR_REGISTRY}/${ECR_API_REPOSITORY}:${IMAGE_TAG}"
 FRONTEND_IMAGE="${ECR_REGISTRY}/${ECR_FRONTEND_REPOSITORY}:${IMAGE_TAG}"
 
+install_packages() {
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y "$@"
+    return
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    dnf install -y "$@"
+    return
+  fi
+
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y "$@"
+    return
+  fi
+
+  if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "$@"
+    return
+  fi
+
+  echo "Gerenciador de pacotes não encontrado para instalar: $*" >&2
+  return 1
+}
+
+ensure_aws_cli() {
+  if command -v aws >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "==> AWS CLI não encontrado. Instalando AWS CLI v2"
+
+  install_packages curl unzip
+
+  local architecture
+  local aws_cli_url
+  local temporary_directory
+
+  architecture="$(uname -m)"
+
+  case "${architecture}" in
+    x86_64|amd64)
+      aws_cli_url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+      ;;
+
+    aarch64|arm64)
+      aws_cli_url="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
+      ;;
+
+    *)
+      echo "Arquitetura não suportada para AWS CLI: ${architecture}" >&2
+      return 1
+      ;;
+  esac
+
+  temporary_directory="$(mktemp -d)"
+
+  (
+    cd "${temporary_directory}"
+    curl --fail --location --silent --show-error \
+      "${aws_cli_url}" \
+      --output awscliv2.zip
+    unzip -q awscliv2.zip
+    ./aws/install --update
+  )
+
+  rm -rf "${temporary_directory}"
+
+  command -v aws >/dev/null 2>&1
+}
+
 echo "==> Iniciando deploy"
 echo "API: ${API_IMAGE}"
 echo "Frontend: ${FRONTEND_IMAGE}"
@@ -23,6 +96,7 @@ echo "Frontend: ${FRONTEND_IMAGE}"
 echo "==> Preparando diretório de produção"
 
 install -d -m 0700 "${DEPLOY_DIRECTORY}"
+ensure_aws_cli
 
 if [[ ! -f "${COMPOSE_FILE}" ]]; then
   echo "Docker Compose de produção não encontrado:" >&2
